@@ -2,7 +2,7 @@ import streamlit as st
 from openai import OpenAI
 
 # Show title and description.
-st.title("🤪 맞춤법 파괴 챗봇")
+st.title("🤪 맛춘뻡 파괘 쳇봍")
 st.write(
     "이 챗봇은 올바른 맞춤법의 문장을 일부러 틀린 맞춤법으로 바꿔주는 재미있는 앱입니다. "
     "OpenAI API 키가 필요하며, [여기서](https://platform.openai.com/account/api-keys) 얻을 수 있습니다."
