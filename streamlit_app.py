@@ -1,69 +1,146 @@
+import os
+import sys
+from typing import Any, Dict, List, Optional
+
+import requests
 import streamlit as st
-from openai import OpenAI
+from dotenv import load_dotenv
 
-# Show title and description.
-st.title("🤪 맛춘뻡 파괘 쳇봍")
-st.write(
-    "이 챗봇은 올바른 맞춤법의 문장을 일부러 틀린 맞춤법으로 바꿔주는 재미있는 앱입니다. "
-    "OpenAI API 키가 필요하며, [여기서](https://platform.openai.com/account/api-keys) 얻을 수 있습니다."
-)
 
-# Ask user for their OpenAI API key via `st.text_input`.
-openai_api_key = st.text_input("OpenAI API Key", type="password")
+# Load environment variables from .env if present
+load_dotenv()
 
-if not openai_api_key:
-    st.info("계속하려면 OpenAI API 키를 입력해주세요.", icon="🗝️")
-else:
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
-    
-    # Create a session state variable to store the chat messages.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # Create a chat input field
-    if prompt := st.chat_input("올바른 맞춤법의 문장을 입력하세요..."):
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Create system message for spelling destruction
-        system_message = {
-            "role": "system", 
-            "content": """당신은 맞춤법을 일부러 틀리게 만드는 전문가입니다. 
-            사용자가 입력한 올바른 한국어 문장을 받아서 다음과 같은 방식으로 맞춤법을 틀리게 만들어주세요:
+API_ENDPOINT = "https://www.googleapis.com/youtube/v3/videos"
 
-            1. 받침 생략하기 (예: "있다" → "잇다", "좋다" → "조타")
-            2. 된소리/거센소리 바꾸기 (예: "빠르다" → "파르다", "크다" → "그다")
-            3. 모음 바꾸기 (예: "어서" → "어써", "그래서" → "그레서")
-            4. 띄어쓰기 틀리기 (예: "할 수 있다" → "할수잇다")
-            5. 비슷한 소리의 글자로 바꾸기 (예: "의" → "에", "를" → "을")
-            
-            자연스럽게 틀린 맞춤법처럼 보이도록 만들어주세요. 너무 과하지 않게 적당히 틀려야 합니다.
-            오직 맞춤법만 틀리게 하고, 문장의 의미는 유지해주세요."""
-        }
-        
-        # Prepare messages for API call
-        api_messages = [system_message] + [
-            {"role": m["role"], "content": m["content"]}
-            for m in st.session_state.messages
-        ]
-        
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=api_messages,
-            stream=True,
+
+def humanize_int(n: Optional[str]) -> str:
+    try:
+        i = int(n) if n is not None else 0
+    except (TypeError, ValueError):
+        i = 0
+    # Korean style short units for readability (approximation)
+    if i >= 100_000_000:
+        return f"{i/100_000_000:.1f}억회"
+    if i >= 10_000:
+        return f"{i/10_000:.1f}만회"
+    return f"{i:,}회"
+
+
+@st.cache_data(show_spinner=True)
+def fetch_trending(api_key: str, region_code: str = "KR", max_results: int = 30) -> List[Dict[str, Any]]:
+    params = {
+        "part": "snippet,statistics",
+        "chart": "mostPopular",
+        "regionCode": region_code,
+        "maxResults": max(1, min(max_results, 50)),  # API allows up to 50
+        "key": api_key,
+    }
+    resp = requests.get(API_ENDPOINT, params=params, timeout=15)
+    # Basic HTTP error handling
+    if not resp.ok:
+        try:
+            problem = resp.json()
+        except Exception:
+            problem = {"error": {"message": resp.text}}
+        raise RuntimeError(f"YouTube API HTTP {resp.status_code}: {problem}")
+
+    data = resp.json()
+    if "items" not in data:
+        raise RuntimeError("Unexpected API response: missing 'items'")
+
+    return data.get("items", [])
+
+
+def main() -> None:
+    st.set_page_config(page_title="YouTube Trending (KR)", layout="wide")
+    st.title("유튜브 인기 동영상")
+    st.caption("간단한 YouTube API로 가져온 실시간 인기 동영상 목록")
+
+    # Controls
+    default_region = os.getenv("REGION_CODE", "KR").upper()[:2]
+    default_max = int(os.getenv("MAX_RESULTS", "30") or 30)
+
+    with st.sidebar:
+        st.header("설정")
+        region_code = st.text_input("지역 코드 (ISO 3166-1 alpha-2)", value=default_region, help="예: KR, US, JP 등")
+        max_results = st.slider("가져올 개수", min_value=1, max_value=50, value=max(1, min(default_max, 50)))
+        refresh = st.button("🔄 새로고침", help="캐시를 비우고 다시 불러옵니다")
+
+    if refresh:
+        # Clear all cached data for this session and rerun
+        st.cache_data.clear()
+        st.experimental_rerun()
+
+    api_key = os.getenv("YOUTUBE_API_KEY")
+    if not api_key:
+        st.error(
+            "환경변수 YOUTUBE_API_KEY 가 설정되어 있지 않습니다. 루트 경로에 .env 파일을 만들고 키를 추가하세요.\n"
+            "예: YOUTUBE_API_KEY=YOUR_KEY_HERE"
         )
-        
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        with st.expander("도움말: API 키 설정 방법"):
+            st.markdown(
+                "- 프로젝트 루트에 `.env` 파일을 만들고 다음 내용을 넣으세요.\n\n"
+                "  `YOUTUBE_API_KEY=YOUR_YOUTUBE_DATA_API_KEY`\n\n"
+                "- Google Cloud Console에서 YouTube Data API v3를 활성화하고 키를 발급받으세요."
+            )
+        return
+
+    # Fetch data
+    try:
+        items = fetch_trending(api_key=api_key, region_code=region_code or "KR", max_results=max_results)
+    except requests.Timeout:
+        st.error("요청 시간이 초과되었습니다. 네트워크 상태를 확인하고 다시 시도하세요.")
+        return
+    except requests.RequestException as e:
+        st.error(f"네트워크 오류가 발생했습니다: {e}")
+        return
+    except Exception as e:
+        st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
+        return
+
+    if not items:
+        st.info("표시할 동영상이 없습니다.")
+        return
+
+    st.subheader(f"인기 동영상 Top {len(items)} ({region_code.upper()})")
+
+    # Display list
+    for idx, v in enumerate(items, start=1):
+        vid = v.get("id")
+        sn = v.get("snippet", {})
+        stc = v.get("statistics", {})
+        title = sn.get("title", "제목 없음")
+        channel = sn.get("channelTitle", "채널 정보 없음")
+        thumb = (
+            (sn.get("thumbnails", {}) or {}).get("medium", {}) or {}
+        ).get("url") or ((sn.get("thumbnails", {}) or {}).get("high", {}) or {}).get("url")
+        views = humanize_int(stc.get("viewCount"))
+        video_url = f"https://www.youtube.com/watch?v={vid}" if vid else None
+
+        row = st.container()
+        with row:
+            cols = st.columns([1, 4])
+            with cols[0]:
+                if thumb:
+                    st.image(thumb, use_container_width=True)
+                else:
+                    st.write(":grey_background[썸네일 없음]")
+            with cols[1]:
+                if video_url:
+                    st.markdown(f"**{idx}. [ {title} ]({video_url})**")
+                else:
+                    st.markdown(f"**{idx}. {title}**")
+                st.write(f"채널: {channel}")
+                st.write(f"조회수: {views}")
+        st.divider()
+
+    st.caption("데이터 출처: YouTube Data API v3 · 이 앱은 학습/데모 목적입니다.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        # Fallback error catcher to ensure Streamlit shows a friendly message
+        st.error(f"예상치 못한 오류가 발생했습니다: {e}")
+        raise
